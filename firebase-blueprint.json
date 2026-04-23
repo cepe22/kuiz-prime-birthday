@@ -1,0 +1,39 @@
+{
+  "entities": {
+    "QuizRoom": {
+      "title": "Quiz Room",
+      "description": "Represents a live quiz session.",
+      "type": "object",
+      "properties": {
+        "pin": { "type": "string", "description": "6-digit room PIN" },
+        "hostId": { "type": "string", "description": "UID of the host" },
+        "status": { "type": "string", "enum": ["lobby", "question", "leaderboard", "podium"] },
+        "currentQ": { "type": "integer" },
+        "startedAt": { "type": "integer", "description": "Server timestamp of current question start" },
+        "quiz": { "type": "array" }
+      },
+      "required": ["pin", "hostId", "status", "currentQ", "quiz"]
+    },
+    "Player": {
+      "title": "Player",
+      "description": "A participant in a quiz room.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "score": { "type": "integer" },
+        "answers": { "type": "object" }
+      },
+      "required": ["name", "score"]
+    }
+  },
+  "firestore": {
+    "artifacts/kahoot-clone-app/public/data/quiz_rooms/{roomId}": {
+      "schema": "QuizRoom",
+      "description": "Master document for a quiz room."
+    },
+    "artifacts/kahoot-clone-app/public/data/quiz_rooms/{roomId}/participants/{playerId}": {
+      "schema": "Player",
+      "description": "Player data within a room."
+    }
+  }
+}

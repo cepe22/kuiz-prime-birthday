@@ -1,0 +1,6 @@
+{
+  "name": "KuisKu - Realtime Quiz Platform",
+  "description": "A real-time interactive quiz platform where hosts can create rooms and players can join via PIN to compete in fast-paced challenges.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

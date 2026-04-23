@@ -1,0 +1,87 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 0. Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helpers ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- Validation Blueprints ---
+
+    function isValidQuizRoom(data) {
+      return data.keys().hasAll(['pin', 'hostId', 'status', 'currentQ', 'quiz'])
+        && data.keys().size() >= 5 && data.keys().size() <= 6
+        && data.pin is string && data.pin.size() == 6
+        && data.hostId == request.auth.uid
+        && data.status in ['lobby', 'question', 'leaderboard', 'podium']
+        && data.currentQ is int
+        && data.quiz is list && data.quiz.size() <= 50
+        && (!data.keys().hasAll(['startedAt']) || data.startedAt == null || data.startedAt is int);
+    }
+
+    function isValidParticipant(data) {
+      return data.keys().hasAll(['name', 'score', 'answers'])
+        && data.keys().size() == 3
+        && data.name is string && data.name.size() <= 32
+        && data.score is int && data.score >= 0
+        && data.answers is map;
+    }
+
+    // --- Match Blocks ---
+
+    match /artifacts/kahoot-clone-app/public/data/quiz_rooms/{roomId} {
+      allow get: if isSignedIn();
+      allow list: if false;
+
+      allow create: if isSignedIn() && isValidId(roomId) && isValidQuizRoom(incoming())
+                    && incoming().status == 'lobby'
+                    && incoming().currentQ == 0;
+
+      allow update: if isSignedIn() && isValidQuizRoom(incoming()) && (
+        // Host Action: Manage Room
+        (existing().hostId == request.auth.uid && (
+          (incoming().diff(existing()).affectedKeys().hasOnly(['status', 'currentQ', 'startedAt'])) ||
+          (existing().status == 'lobby' && incoming().diff(existing()).affectedKeys().hasOnly(['quiz']))
+        ))
+      );
+
+      allow delete: if isSignedIn() && existing().hostId == request.auth.uid;
+
+      match /participants/{playerId} {
+        allow read: if isSignedIn();
+
+        allow create: if isSignedIn() && isValidId(playerId) && playerId == request.auth.uid
+                      && get(/databases/$(database)/documents/artifacts/kahoot-clone-app/public/data/quiz_rooms/$(roomId)).data.status == 'lobby'
+                      && isValidParticipant(incoming())
+                      && incoming().score == 0
+                      && incoming().answers.size() == 0;
+
+        allow update: if isSignedIn() && playerId == request.auth.uid
+                      && isValidParticipant(incoming())
+                      && (
+                        (get(/databases/$(database)/documents/artifacts/kahoot-clone-app/public/data/quiz_rooms/$(roomId)).data.status == 'question'
+                         && incoming().diff(existing()).affectedKeys().hasOnly(['score', 'answers'])
+                         && incoming().score >= existing().score
+                        )
+                      );
+      }
+    }
+  }
+}
