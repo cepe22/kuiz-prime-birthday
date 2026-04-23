@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { 
   onAuthStateChanged,
   User,
-  signInWithPopup
+  signInWithPopup,
+  signInAnonymously
 } from 'firebase/auth';
 import { 
   collection, 
@@ -53,6 +54,7 @@ export default function App() {
   const [participants, setParticipants] = useState<any[]>([]);
   const [roomPin, setRoomPin] = useState('');
   const [playerName, setPlayerName] = useState('');
+  const [isEditingName, setIsEditingName] = useState(false);
   
   const [quizForm, setQuizForm] = useState([
     { question: 'Apa ibu kota Indonesia?', options: ['Bandung', 'Surabaya', 'Jakarta', 'Medan'], correct: 2, timeLimit: 20 },
@@ -78,14 +80,23 @@ export default function App() {
     }
   };
 
+  const handleAnonymously = async () => {
+    if (!auth.currentUser) {
+      await signInAnonymously(auth);
+    }
+  };
+
   // Room Listener
   useEffect(() => {
-    if (!user || !roomPin || appMode === 'home' || appMode === 'host_setup') return;
+    if (!roomPin || appMode === 'home' || appMode === 'host_setup') return;
 
     const roomRef = doc(db, ROOMS_PATH, roomPin);
     const unsubRoom = onSnapshot(roomRef, (snapshot) => {
       if (snapshot.exists()) {
-        setRoomData(snapshot.data());
+        const data = snapshot.data();
+        setRoomData(data);
+        // If room is no longer in lobby and player hasn't set their name/joined properly, reset?
+        // Actually, let the PlayerGameView handle UI states.
       } else {
         setErrorMsg('Ruangan tidak ditemukan atau telah ditutup.');
         setAppMode('home');
@@ -107,10 +118,48 @@ export default function App() {
       unsubRoom();
       unsubParticipants();
     };
-  }, [user, roomPin, appMode]);
+  }, [roomPin, appMode]);
+
+  const handleValidatePin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!roomPin) return;
+
+    const roomRef = doc(db, ROOMS_PATH, roomPin);
+    try {
+      const snap = await doc(db, ROOMS_PATH, roomPin).withConverter(null as any).get(); // Use v9 compat or direct check
+      // Actually with onSnapshot above, we can just transition. But let's check existence first.
+      const roomSnap = await query(collection(db, ROOMS_PATH)).get(); // We can't query rooms easily by PIN if it's the ID without a doc ref
+      // Best way: just try to listen.
+      setAppMode('playing');
+      await handleAnonymously();
+    } catch (err) {
+      setErrorMsg("Gagal memvalidasi PIN.");
+    }
+  };
+
+  const handleJoinLobby = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!auth.currentUser || !roomPin || !playerName) return;
+
+    const participantRef = doc(db, ROOMS_PATH, roomPin, 'participants', auth.currentUser.uid);
+    try {
+      await setDoc(participantRef, {
+        name: playerName,
+        score: 0,
+        answers: {}
+      });
+      setIsEditingName(false);
+    } catch (err: any) {
+      console.error("Join error:", err);
+      setErrorMsg("Gagal menyimpan nama.");
+    }
+  };
 
   const handleCreateRoom = async () => {
-    if (!user) return;
+    if (!user) {
+      await handleGoogleLogin();
+      return;
+    }
     
     // Validation
     for (const q of quizForm) {
@@ -139,29 +188,6 @@ export default function App() {
     }
   };
 
-  const handleJoinRoom = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!user || !roomPin || !playerName) return;
-
-    if (roomData?.status !== 'lobby') {
-      setErrorMsg("Kuis sudah dimulai atau sudah selesai.");
-      return;
-    }
-
-    const participantRef = doc(db, ROOMS_PATH, roomPin, 'participants', user.uid);
-    
-    try {
-      await setDoc(participantRef, {
-        name: playerName,
-        score: 0,
-        answers: {}
-      });
-      setAppMode('playing');
-    } catch (err: any) {
-      console.error("Join error:", err);
-      setErrorMsg("Gagal bergabung. Pastikan PIN benar.");
-    }
-  };
 
   if (loading) {
     return (
@@ -219,11 +245,8 @@ export default function App() {
             >
               <HomeView 
                 roomPin={roomPin} setRoomPin={setRoomPin}
-                playerName={playerName} setPlayerName={setPlayerName}
-                onJoin={handleJoinRoom}
+                onJoin={handleValidatePin}
                 onCreateClick={() => setAppMode('host_setup')}
-                user={user}
-                onLogin={handleGoogleLogin}
               />
             </motion.div>
           )}
@@ -253,7 +276,17 @@ export default function App() {
 
           {appMode === 'playing' && roomData && (
             <motion.div key="playing" className="flex-1 w-full" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
-              <PlayerGameView roomData={roomData} user={user!} participants={participants} roomPin={roomPin} />
+              <PlayerGameView 
+                roomData={roomData} 
+                user={auth.currentUser!} 
+                participants={participants} 
+                roomPin={roomPin}
+                playerName={playerName}
+                setPlayerName={setPlayerName}
+                onJoinLobby={handleJoinLobby}
+                isEditingName={isEditingName}
+                setIsEditingName={setIsEditingName}
+              />
             </motion.div>
           )}
         </AnimatePresence>
@@ -264,57 +297,35 @@ export default function App() {
 
 // --- Views & Components (Sub-components of App) ---
 
-function HomeView({ roomPin, setRoomPin, playerName, setPlayerName, onJoin, onCreateClick, user, onLogin }: any) {
+function HomeView({ roomPin, setRoomPin, onJoin, onCreateClick }: any) {
   return (
     <div className="flex-1 flex flex-col items-center justify-center bg-purple-700 p-6 min-h-[calc(100vh-4rem)]">
       <div className="bg-white rounded-3xl shadow-2xl p-8 sm:p-10 w-full max-w-md text-center border-b-8 border-gray-200">
         <h1 className="text-5xl font-black text-gray-900 mb-2 tracking-tight italic">KUISKU!</h1>
         <p className="text-purple-600 font-bold mb-8 uppercase tracking-widest text-xs">Ayo Main Bareng Teman!</p>
         
-        {!user ? (
-          <div className="flex flex-col gap-4">
-            <p className="text-gray-500 font-bold text-sm">Masuk untuk mulai bermain atau membuat kuis.</p>
-            <button 
-              onClick={onLogin}
-              className="w-full bg-white border-4 border-gray-100 flex items-center justify-center gap-3 py-4 rounded-2xl font-black text-lg hover:bg-gray-50 transition-all shadow-[0_4px_0_rgb(229,231,235)] active:shadow-none active:translate-y-1"
-            >
-              <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" className="w-6 h-6" alt="Google" />
-              MASUK DENGAN GOOGLE
-            </button>
-          </div>
-        ) : (
-          <form onSubmit={onJoin} className="flex flex-col gap-5 mb-10">
-            <input 
-              type="text" 
-              placeholder="PIN RUANGAN" 
-              className="w-full text-center text-3xl font-black p-5 border-4 border-gray-100 rounded-2xl focus:border-purple-400 focus:outline-none transition-all placeholder:text-gray-300"
-              value={roomPin}
-              onChange={(e) => setRoomPin(e.target.value)}
-              required
-              maxLength={6}
-            />
-            <input 
-              type="text" 
-              placeholder="NAMA KAMU" 
-              className="w-full text-center text-2xl font-bold p-5 border-4 border-gray-100 rounded-2xl focus:border-purple-400 focus:outline-none transition-all placeholder:text-gray-300"
-              value={playerName}
-              onChange={(e) => setPlayerName(e.target.value)}
-              required
-              maxLength={15}
-            />
-            <button 
-              type="submit"
-              className="group relative w-full bg-blue-600 text-white font-black text-2xl py-6 rounded-2xl hover:bg-blue-700 transition-all shadow-[0_8px_0_rgb(30,58,138)] active:shadow-none active:translate-y-2"
-            >
-              MAIN SEKARANG
-            </button>
-          </form>
-        )}
+        <form onSubmit={onJoin} className="flex flex-col gap-5 mb-10">
+          <input 
+            type="text" 
+            placeholder="PIN RUANGAN" 
+            className="w-full text-center text-3xl font-black p-5 border-4 border-gray-100 rounded-2xl focus:border-purple-400 focus:outline-none transition-all placeholder:text-gray-300"
+            value={roomPin}
+            onChange={(e) => setRoomPin(e.target.value)}
+            required
+            maxLength={6}
+          />
+          <button 
+            type="submit"
+            className="group relative w-full bg-blue-600 text-white font-black text-2xl py-6 rounded-2xl hover:bg-blue-700 transition-all shadow-[0_8px_0_rgb(30,58,138)] active:shadow-none active:translate-y-2"
+          >
+            GABUNG SEKARANG
+          </button>
+        </form>
 
         <div className="border-t border-gray-100 pt-8 mt-2">
           <p className="text-gray-400 mb-2 font-bold text-xs uppercase">Mau jadi pembawa acara?</p>
           <button 
-            onClick={user ? onCreateClick : onLogin}
+            onClick={onCreateClick}
             className="text-purple-600 font-black text-lg hover:text-purple-800 transition-colors underline decoration-4 underline-offset-4"
           >
             BUAT KUIS SENDIRI
@@ -646,7 +657,7 @@ function HostTimer({ startedAt, timeLimit, onTimeUp, totalAnswered, totalPlayers
   );
 }
 
-function PlayerGameView({ roomData, user, participants, roomPin }: any) {
+function PlayerGameView({ roomData, user, participants, roomPin, playerName, setPlayerName, onJoinLobby, isEditingName, setIsEditingName }: any) {
   const me = participants.find((p: any) => p.id === user.uid);
   const qIndex = roomData.currentQ;
   const currentQData = roomData.quiz[qIndex];
@@ -676,14 +687,54 @@ function PlayerGameView({ roomData, user, participants, roomPin }: any) {
     }
   };
 
-  if (roomData.status === 'lobby') {
+  if (roomData.status === 'lobby' || !me || isEditingName) {
+    if (!me || isEditingName) {
+      return (
+        <div className="flex-1 flex flex-col items-center justify-center bg-purple-700 p-6">
+          <div className="bg-white rounded-3xl p-8 w-full max-w-sm text-center shadow-2xl">
+            <h2 className="text-3xl font-black mb-6 italic uppercase">SIAPA NAMA KAMU?</h2>
+            <form onSubmit={onJoinLobby} className="flex flex-col gap-4">
+              <input 
+                type="text" 
+                placeholder="KETIK NAMA DISINI" 
+                className="w-full text-center text-2xl font-bold p-4 border-4 border-gray-100 rounded-2xl focus:border-purple-400 outline-none"
+                value={playerName}
+                onChange={(e) => setPlayerName(e.target.value)}
+                required
+                maxLength={15}
+                autoFocus
+              />
+              <button type="submit" className="bg-green-500 text-white font-black text-xl py-4 rounded-2xl shadow-[0_4px_0_rgb(21,128,61)]">GABUNG!</button>
+            </form>
+          </div>
+        </div>
+      );
+    }
     return (
-      <div className="flex-1 flex flex-col items-center justify-center bg-green-500 p-10 text-white text-center">
-        <motion.div animate={{ scale: [1, 1.1, 1] }} transition={{ repeat: Infinity, duration: 2 }}>
-          <Check className="w-32 h-32 sm:w-40 sm:h-40 mb-8 mx-auto bg-white/20 p-8 rounded-full" />
-        </motion.div>
-        <h2 className="text-4xl sm:text-5xl font-black mb-6 italic uppercase tracking-tighter">MASUK!</h2>
-        <p className="text-xl sm:text-2xl font-bold opacity-80 max-w-xs uppercase leading-relaxed mx-auto italic">Tunggu Host Memulai Kuis Di Depan Ya!</p>
+      <div className="flex-1 flex flex-col bg-purple-700 p-6 sm:p-8">
+        <div className="bg-white rounded-3xl p-8 text-center shadow-xl mb-6 relative">
+          <div className="text-4xl font-black text-gray-900 animate-bounce mb-2 uppercase">{me.name}!</div>
+          <p className="text-purple-600 font-bold italic">Kamu sudah masuk! Tunggu host mulai ya...</p>
+          <button 
+            onClick={() => setIsEditingName(true)}
+            className="mt-4 text-xs font-black text-gray-400 hover:text-purple-600 uppercase underline decoration-2 underline-offset-4"
+          >
+            EDIT NAMA
+          </button>
+        </div>
+        
+        <div className="flex-1 bg-black/10 rounded-3xl p-6 backdrop-blur-sm border border-white/10 overflow-y-auto">
+          <div className="text-white font-black text-sm uppercase tracking-widest mb-6 opacity-60 flex items-center gap-2">
+            <Users className="w-4 h-4" /> Teman-teman yang sudah masuk ({participants.length}):
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            {participants.map((p: any) => (
+              <div key={p.id} className={`p-3 rounded-xl font-black text-center truncate shadow-md ${p.id === user.uid ? 'bg-yellow-400 text-yellow-950 scale-105 border-2 border-white' : 'bg-white text-purple-700'}`}>
+                {p.name}
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
     );
   }
